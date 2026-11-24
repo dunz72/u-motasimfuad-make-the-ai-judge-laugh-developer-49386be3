@@ -1,114 +1,123 @@
-"""Developer-excuses entry runner.
+#!/usr/bin/env python3
+"""Copy the developer-excuses entry into the grading output dir.
 
-Reads the single-line excuse from entry.txt beside this file, checks it
-against the competition gate (one line, 1-200 characters), and copies it
-byte for byte into $MAKEFUN_OUTPUT_DIR/entry.txt (default /output).
-The copy is then re-read and its SHA-256 is compared with the source,
-so a truncated or mangled write is caught here instead of failing on
-the grader. Standard library only: the grading image ships no
-third-party packages.
+The competition wants one line, 76 characters in our case, delivered as
+entry.txt inside $MAKEFUN_OUTPUT_DIR (falling back to /output). This
+script loads entry.txt from its own folder, validates the single-line
+gate, copies the bytes untouched, then re-reads the copy and checks the
+SHA-256 so a bad write is caught here, not on the grader.
+
+Only the standard library is used: the grading image has no
+third-party packages installed.
 """
 
 import hashlib
 import os
 import sys
 
-
-CHAR_LIMIT = 200
-
-
-def abort(reason):
-    """Report a problem on stderr and stop with a non-zero exit."""
-    print(f"error: {reason}", file=sys.stderr)
-    sys.exit(1)
+MAX_CHARS = 200
+MIN_CHARS = 1
 
 
-def script_dir():
-    """Directory holding this script (and entry.txt)."""
+def fail(message):
+    """Print message to stderr and exit non-zero."""
+    sys.stderr.write("error: %s\n" % message)
+    raise SystemExit(1)
+
+
+def here():
+    """Absolute path of the folder holding this script."""
     return os.path.dirname(os.path.abspath(__file__))
 
 
-def read_bytes(path):
-    """Return the raw bytes of path, or stop with an error."""
+def load_source():
+    """Read entry.txt next to this script; return its raw bytes."""
+    path = os.path.join(here(), "entry.txt")
     try:
-        with open(path, "rb") as handle:
-            return handle.read()
+        with open(path, "rb") as stream:
+            return stream.read()
     except OSError as exc:
-        abort(f"cannot read {path}: {exc}")
+        fail("cannot read %s: %s" % (path, exc))
 
 
-def decode_text(data):
-    """Decode entry bytes as UTF-8, or stop with an error."""
+def as_text(raw):
+    """Decode raw bytes as UTF-8, failing on bad encoding."""
     try:
-        return data.decode("utf-8")
+        return raw.decode("utf-8")
     except UnicodeDecodeError:
-        abort("entry.txt is not valid UTF-8")
+        fail("entry.txt is not valid UTF-8")
 
 
-def check_line(text):
-    """Enforce the gate: exactly one visible line, 1-200 chars."""
-    if "\n" in text or "\r" in text:
-        abort("entry.txt must hold exactly one line (no newline)")
-    if not text.strip():
-        abort("entry.txt must not be empty or only whitespace")
-    if len(text) > CHAR_LIMIT:
-        abort(
-            f"entry is {len(text)} chars, but the sealed limit is {CHAR_LIMIT}"
-        )
-    # One visible line, nothing hidden before or after it.
-    if text != text.strip():
-        abort("entry.txt must not have leading or trailing spaces")
+def validate_excuse(line):
+    """Check the one-line gate: length 1-200, no newlines, no padding."""
+    if "\r" in line or "\n" in line:
+        fail("entry.txt must hold exactly one line, no line breaks")
+    size = len(line)
+    if size < MIN_CHARS:
+        fail("entry.txt is empty")
+    if size > MAX_CHARS:
+        fail("entry is %d chars, limit is %d" % (size, MAX_CHARS))
+    if line.strip() != line:
+        fail("entry.txt must not start or end with whitespace")
+    if not line.strip():
+        fail("entry.txt must not be blank")
+    for ch in line:
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:
+            fail("entry.txt must not contain control characters")
 
 
-def output_dir():
-    """Destination directory from the environment, or /output."""
+def target_dir():
+    """Output folder from the environment, defaulting to /output."""
     return os.environ.get("MAKEFUN_OUTPUT_DIR") or "/output"
 
 
-def ensure_dir(path):
-    """Create the output directory if needed, or stop with an error."""
+def make_dir(path):
+    """Create path (including parents) when missing."""
     try:
         os.makedirs(path, exist_ok=True)
     except OSError as exc:
-        abort(f"cannot create output dir {path}: {exc}")
+        fail("cannot create output dir %s: %s" % (path, exc))
 
 
-def write_copy(path, data):
-    """Write data to path, or stop with an error."""
+def save(path, raw):
+    """Write raw bytes to path."""
     try:
-        with open(path, "wb") as handle:
-            handle.write(data)
+        with open(path, "wb") as stream:
+            stream.write(raw)
     except OSError as exc:
-        abort(f"cannot write {path}: {exc}")
+        fail("cannot write %s: %s" % (path, exc))
 
 
-def digest(data):
-    """SHA-256 hex digest of data."""
-    return hashlib.sha256(data).hexdigest()
+def sha(raw):
+    """SHA-256 hex digest of raw bytes."""
+    return hashlib.sha256(raw).hexdigest()
 
 
-def confirm_copy(path, expected):
-    """Re-read path and stop unless its digest matches expected."""
-    written = read_bytes(path)
-    if digest(written) != expected:
-        abort("output differs from entry.txt (sha256 mismatch)")
+def verify_written(path, expected_digest):
+    """Re-read path and fail unless its digest equals expected_digest."""
+    try:
+        with open(path, "rb") as stream:
+            written = stream.read()
+    except OSError as exc:
+        fail("cannot re-read %s: %s" % (path, exc))
+    if sha(written) != expected_digest:
+        fail("output differs from entry.txt (sha256 mismatch)")
 
 
-def run():
-    source = os.path.join(script_dir(), "entry.txt")
-    data = read_bytes(source)
-    text = decode_text(data)
-    check_line(text)
+def main():
+    raw = load_source()
+    line = as_text(raw)
+    validate_excuse(line)
 
-    dest_dir = output_dir()
-    ensure_dir(dest_dir)
-    dest = os.path.join(dest_dir, "entry.txt")
-    write_copy(dest, data)
-    confirm_copy(dest, digest(data))
+    folder = target_dir()
+    make_dir(folder)
+    dest = os.path.join(folder, "entry.txt")
+    save(dest, raw)
+    verify_written(dest, sha(raw))
 
-    print(f"wrote {len(data)} bytes, {len(text)} chars -> {dest}")
-    print(f"sha256: {digest(data)}")
+    print("wrote %d bytes, %d chars -> %s" % (len(raw), len(line), dest))
+    print("sha256: %s" % sha(raw))
 
 
 if __name__ == "__main__":
-    run()
+    main()
